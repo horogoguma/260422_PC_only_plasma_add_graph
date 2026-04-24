@@ -6,6 +6,8 @@ from math import sqrt
 from .plasma import ChamberConditions, PlasmaCalculator, PlasmaComputationResult, PlasmaConditions
 from .spice import PlasmaCircuitParameters, PlasmaCircuitResult, SpiceSimulator
 
+MIN_BULK_HEIGHT_M = 0.5e-3
+
 
 @dataclass(frozen=True)
 class SelfConsistentPlasmaCircuitResult:
@@ -25,28 +27,91 @@ class SelfConsistentPlasmaCircuitResult:
     absorbed_bulk_power_w: float
 
 
+def _validate_positive_bulk_height(
+    electrode_sheath_m: float,
+    grounded_sheath_m: float,
+    chamber_height_m: float,
+) -> None:
+    """Reject sheath pairs that consume the whole chamber."""
+    bulk_height_m = chamber_height_m - electrode_sheath_m - grounded_sheath_m
+    if bulk_height_m <= MIN_BULK_HEIGHT_M:
+        raise ValueError(
+            "Coupled solver predicted sheath lengths that leave too little bulk plasma. "
+            f"chamber_height={chamber_height_m * 1e3:g} mm, "
+            f"electrode_sheath={electrode_sheath_m * 1e3:g} mm, "
+            f"grounded_sheath={grounded_sheath_m * 1e3:g} mm, "
+            f"bulk_height={bulk_height_m * 1e3:g} mm."
+        )
+
+
+def _has_positive_bulk_height(
+    electrode_sheath_m: float,
+    grounded_sheath_m: float,
+    chamber_height_m: float,
+) -> bool:
+    """Return whether sheath lengths leave enough bulk height."""
+    return chamber_height_m - electrode_sheath_m - grounded_sheath_m > MIN_BULK_HEIGHT_M
+
+
 def solve_self_consistent_plasma_circuit(
     plasma: PlasmaCalculator,
     simulator: SpiceSimulator,
     chamber: ChamberConditions,
     plasma_conditions: PlasmaConditions,
-    max_iterations: int = 80,
+    max_iterations: int = 1000,
+    min_iterations: int = 30,
+    min_sheath_hold_iterations: int = 20,
+    max_sheath_hold_iterations: int = 60,
+    pre_sheath_relative_tolerance: float = 1e-4,
+    pre_sheath_stable_iterations: int = 5,
     relative_tolerance: float = 1e-6,
     damping: float = 0.5,
+    sheath_damping: float = 0.05,
 ) -> SelfConsistentPlasmaCircuitResult:
     """Iterate until plasma sheath lengths and sheath voltage are self-consistent."""
     if plasma.compute_electrode_area_m2(chamber) <= 0:
         raise ValueError("Electrode area must be positive to compute current density.")
     if max_iterations <= 0:
         raise ValueError("max_iterations must be positive.")
+    if min_iterations <= 0:
+        raise ValueError("min_iterations must be positive.")
+    if min_iterations > max_iterations:
+        raise ValueError("min_iterations cannot exceed max_iterations.")
+    if min_sheath_hold_iterations < 0:
+        raise ValueError("min_sheath_hold_iterations must be non-negative.")
+    if min_sheath_hold_iterations > max_iterations:
+        raise ValueError("min_sheath_hold_iterations cannot exceed max_iterations.")
+    if max_sheath_hold_iterations < min_sheath_hold_iterations:
+        raise ValueError(
+            "max_sheath_hold_iterations cannot be less than min_sheath_hold_iterations."
+        )
+    if max_sheath_hold_iterations > max_iterations:
+        raise ValueError("max_sheath_hold_iterations cannot exceed max_iterations.")
+    if pre_sheath_relative_tolerance <= 0:
+        raise ValueError("pre_sheath_relative_tolerance must be positive.")
+    if pre_sheath_stable_iterations <= 0:
+        raise ValueError("pre_sheath_stable_iterations must be positive.")
     if not (0 < damping <= 1):
         raise ValueError("damping must be in the interval (0, 1].")
+    if not (0 < sheath_damping <= 1):
+        raise ValueError("sheath_damping must be in the interval (0, 1].")
 
-    working_conditions = replace(plasma_conditions)
+    _validate_positive_bulk_height(
+        plasma_conditions.sheath_length_electrode_m,
+        plasma_conditions.sheath_length_grounded_m,
+        chamber.chamber_height_m,
+    )
+    working_conditions = replace(
+        plasma_conditions,
+    )
+    initial_sheath_length_electrode_m = plasma_conditions.sheath_length_electrode_m
+    initial_sheath_length_grounded_m = plasma_conditions.sheath_length_grounded_m
     last_relative_change = float("inf")
     last_sheath_voltage_relative_change = float("inf")
     last_bulk_power_relative_change = float("inf")
     converged = False
+    pre_sheath_stable_count = 0
+    sheath_updates_enabled = False
 
     if working_conditions.absorbed_bulk_power_w is None:
         working_conditions = replace(
@@ -101,46 +166,90 @@ def solve_self_consistent_plasma_circuit(
             rf_voltage=circuit_result.source_voltage_peak,
         )
         updated_sheath_voltage = (
-            (1 - damping) * working_conditions.sheath_voltage
-            + damping * total_sheath_voltage
+            (1 - sheath_damping) * working_conditions.sheath_voltage
+            + sheath_damping * total_sheath_voltage
         )
-        raw_sheath_length_electrode_m = plasma.compute_plasma_sheath_length_electrode(
-            current_density_a_per_m2=current_density_electrode,
-            rf_frequency_hz=working_conditions.RF_frequency,
-            pressure_torr=chamber.pressure_torr,
-            electron_temperature_ev=plasma_result.electron_temperature_ev,
-            rf_power=working_conditions.RF_power,
-            sheath_voltage=updated_sheath_voltage,
-            chamber_radius_m=chamber.chamber_radius_m,
-            chamber_height_m=chamber.chamber_height_m,
-        )
-        raw_sheath_length_grounded_m = plasma.compute_plasma_sheath_length_grounded(
-            current_density_a_per_m2=current_density_grounded,
-            rf_frequency_hz=working_conditions.RF_frequency,
-            pressure_torr=chamber.pressure_torr,
-            electron_temperature_ev=plasma_result.electron_temperature_ev,
-            rf_power=working_conditions.RF_power,
-            sheath_voltage=updated_sheath_voltage,
-            chamber_radius_m=chamber.chamber_radius_m,
-            chamber_height_m=chamber.chamber_height_m,
-        )
-        updated_sheath_length_electrode_m = (
-            (1 - damping) * working_conditions.sheath_length_electrode_m
-            + damping * raw_sheath_length_electrode_m
-        )
-        updated_sheath_length_grounded_m = (
-            (1 - damping) * working_conditions.sheath_length_grounded_m
-            + damping * raw_sheath_length_grounded_m
-        )
-        last_relative_change = abs(
-            updated_sheath_length_electrode_m - working_conditions.sheath_length_electrode_m
-        ) / max(abs(working_conditions.sheath_length_electrode_m), 1e-30)
         last_sheath_voltage_relative_change = abs(
-            updated_sheath_voltage - working_conditions.sheath_voltage
+            total_sheath_voltage - working_conditions.sheath_voltage
         ) / max(abs(working_conditions.sheath_voltage), 1e-30)
         last_bulk_power_relative_change = abs(
             updated_absorbed_bulk_power_w - working_conditions.absorbed_bulk_power_w
         ) / max(abs(working_conditions.absorbed_bulk_power_w), 1e-30)
+        if (
+            last_sheath_voltage_relative_change < pre_sheath_relative_tolerance
+            and last_bulk_power_relative_change < pre_sheath_relative_tolerance
+        ):
+            pre_sheath_stable_count += 1
+        else:
+            pre_sheath_stable_count = 0
+        if (
+            not sheath_updates_enabled
+            and iteration >= min_sheath_hold_iterations
+            and (
+                pre_sheath_stable_count >= pre_sheath_stable_iterations
+                or iteration >= max_sheath_hold_iterations
+            )
+        ):
+            sheath_updates_enabled = True
+
+        geometry_limited = False
+        if not sheath_updates_enabled:
+            updated_sheath_length_electrode_m = initial_sheath_length_electrode_m
+            updated_sheath_length_grounded_m = initial_sheath_length_grounded_m
+        else:
+            raw_sheath_length_electrode_m = plasma.compute_plasma_sheath_length_electrode(
+                current_density_a_per_m2=current_density_electrode,
+                rf_frequency_hz=working_conditions.RF_frequency,
+                pressure_torr=chamber.pressure_torr,
+                electron_temperature_ev=plasma_result.electron_temperature_ev,
+                rf_power=working_conditions.RF_power,
+                sheath_voltage=updated_sheath_voltage,
+                chamber_radius_m=chamber.chamber_radius_m,
+                chamber_height_m=chamber.chamber_height_m,
+            )
+            raw_sheath_length_grounded_m = plasma.compute_plasma_sheath_length_grounded(
+                current_density_a_per_m2=current_density_grounded,
+                rf_frequency_hz=working_conditions.RF_frequency,
+                pressure_torr=chamber.pressure_torr,
+                electron_temperature_ev=plasma_result.electron_temperature_ev,
+                rf_power=working_conditions.RF_power,
+                sheath_voltage=updated_sheath_voltage,
+                chamber_radius_m=chamber.chamber_radius_m,
+                chamber_height_m=chamber.chamber_height_m,
+            )
+            current_electrode_sheath_m = working_conditions.sheath_length_electrode_m
+            current_grounded_sheath_m = working_conditions.sheath_length_grounded_m
+            sheath_step = sheath_damping
+            updated_sheath_length_electrode_m = (
+                (1 - sheath_step) * current_electrode_sheath_m
+                + sheath_step * raw_sheath_length_electrode_m
+            )
+            updated_sheath_length_grounded_m = (
+                (1 - sheath_step) * current_grounded_sheath_m
+                + sheath_step * raw_sheath_length_grounded_m
+            )
+            while not _has_positive_bulk_height(
+                updated_sheath_length_electrode_m,
+                updated_sheath_length_grounded_m,
+                chamber.chamber_height_m,
+            ):
+                geometry_limited = True
+                sheath_step *= 0.5
+                if sheath_step < 1e-9:
+                    updated_sheath_length_electrode_m = current_electrode_sheath_m
+                    updated_sheath_length_grounded_m = current_grounded_sheath_m
+                    break
+                updated_sheath_length_electrode_m = (
+                    (1 - sheath_step) * current_electrode_sheath_m
+                    + sheath_step * raw_sheath_length_electrode_m
+                )
+                updated_sheath_length_grounded_m = (
+                    (1 - sheath_step) * current_grounded_sheath_m
+                    + sheath_step * raw_sheath_length_grounded_m
+                )
+        last_relative_change = abs(
+            updated_sheath_length_electrode_m - working_conditions.sheath_length_electrode_m
+        ) / max(abs(working_conditions.sheath_length_electrode_m), 1e-30)
         working_conditions = replace(
             working_conditions,
             sheath_length_electrode_m=updated_sheath_length_electrode_m,
@@ -153,7 +262,10 @@ def solve_self_consistent_plasma_circuit(
         )
 
         if (
-            last_relative_change < relative_tolerance
+            iteration >= min_iterations
+            and sheath_updates_enabled
+            and not geometry_limited
+            and last_relative_change < relative_tolerance
             and last_sheath_voltage_relative_change < relative_tolerance
             and last_bulk_power_relative_change < relative_tolerance
         ):

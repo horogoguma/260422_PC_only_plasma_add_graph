@@ -5,18 +5,31 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from PySide6.QtCore import QFile
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import (
+    QComboBox,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
-from src.app import FixedInputs, format_simulation_result, run_single_simulation
+from src.app import (
+    FixedInputs,
+    SimulationResult,
+    SweepSpec,
+    format_simulation_result,
+    run_parameter_sweep,
+    run_single_simulation,
+)
 
 UI_FILENAME = "plasma_calculator.ui"
 
@@ -34,12 +47,117 @@ INPUT_FIELD_NAMES = {
     "rf_frequency": "rfFrequencyEdit",
 }
 
+SWEEP_PARAMETER_LABELS = {
+    "chamber_height_mm": "Chamber height (mm)",
+    "chamber_radius_mm": "Chamber radius (mm)",
+    "pressure_torr": "Pressure (Torr)",
+    "electrode_radius_mm": "Electrode radius (mm)",
+    "rf_power": "RF power (W)",
+    "rf_frequency": "RF frequency (Hz)",
+}
+
+SWEEP_Y_AXIS_NAMES = (
+    "target_value_close_to_1",
+    "electron_temperature_iterations",
+    "coupled_converged",
+    "coupled_iterations",
+    "sheath_length_relative_change",
+    "sheath_voltage_relative_change",
+    "bulk_power_relative_change",
+    "absorbed_bulk_power_w",
+    "self_consistent_electrode_sheath_length_m",
+    "self_consistent_electrode_sheath_length_mm",
+    "self_consistent_grounded_sheath_length_m",
+    "self_consistent_grounded_sheath_length_mm",
+    "electrode_radius_m",
+    "electrode_radius_mm",
+    "electrode_area_m2",
+    "grounded_area_m2",
+    "bulk_plasma_height_m",
+    "bulk_plasma_height_mm",
+    "current_density_a_per_m2",
+    "current_density_rms_a_per_m2",
+    "electron_temperature_ev",
+    "number_need_to_be_one",
+    "elastic_collision_constant",
+    "excitation_constant",
+    "debye_length_m",
+    "ionization_constant",
+    "bohm_velocity",
+    "gas_number_density",
+    "effective_length",
+    "collision_energy_loss",
+    "electron_ion_energy_loss",
+    "total_energy_loss",
+    "plasma_total_sheath_voltage",
+    "plasma_density",
+    "ion_mean_free_path_m",
+    "collisional_frequency",
+    "plasma_angular_frequency",
+    "plasma_conductivity",
+    "plasma_relative_permittivity",
+    "plasma_resistance",
+    "plasma_coil_reactance",
+    "plasma_capacitive_reactance",
+    "plasma_coil_inductance_h",
+    "plasma_capacitance_f",
+    "plasma_sheath_capacitance_f_per_m2",
+    "plasma_sheath_capacitance_electrode_f",
+    "plasma_sheath_capacitance_grounded_f",
+    "electron_velocity",
+    "plasma_sheath_conductance_s_per_m2",
+    "plasma_sheath_resistance_electrode_ohm",
+    "plasma_sheath_resistance_grounded_ohm",
+    "plasma_wall_potential_v",
+    "plasma_target_power_w",
+    "plasma_source_voltage_peak_v",
+    "plasma_source_voltage_rms_v",
+    "plasma_voltage_bias_v",
+    "plasma_bias_v_theta_rad",
+    "plasma_voltage_sheath_grounded_v",
+    "plasma_voltage_sheath_electrode_v",
+    "plasma_bulk_impedance_ohm",
+    "plasma_grounded_sheath_impedance_ohm",
+    "plasma_total_impedance_ohm",
+    "plasma_source_current_rms_a",
+    "plasma_src_node_current_rms_a",
+    "plasma_src_node_resistor_current_rms_a",
+    "plasma_src_node_capacitor_current_rms_a",
+    "electrode_sheath_resistor_power_w",
+    "plasma_resistance_power_w",
+    "grounded_sheath_resistor_power_w",
+    "total_resistor_power_w",
+    "plasma_average_power_w",
+)
+
+
+def _format_output_label(field_name: str) -> str:
+    return field_name.replace("_", " ")
+
+
+def _plot_value(value: float | bool | complex) -> float:
+    if isinstance(value, complex):
+        return abs(value)
+    return float(value)
+
 
 class PlasmaCalculatorWindow:
     """Qt main window loaded from Designer UI."""
 
     def __init__(self) -> None:
         self._input_fields: dict[str, QLineEdit] = {}
+        self._sweep_parameter_combo: QComboBox
+        self._sweep_y_axis_combo: QComboBox
+        self._sweep_start_edit: QLineEdit
+        self._sweep_stop_edit: QLineEdit
+        self._sweep_points_spin_box: QSpinBox
+        self._sweep_canvas: FigureCanvas
+        self._sweep_figure: Figure
+        self._sweep_axis: Any
+        self._last_sweep_results: list[SimulationResult] = []
+        self._last_sweep_variable_name: str | None = None
+        self._last_sweep_x_label: str | None = None
+        self._last_sweep_x_limits: tuple[float, float] | None = None
         self._result_view: QPlainTextEdit
         self._window: QMainWindow
         self._build_ui()
@@ -55,6 +173,47 @@ class PlasmaCalculatorWindow:
 
         for field_name, object_name in INPUT_FIELD_NAMES.items():
             self._input_fields[field_name] = self._require_child(QLineEdit, object_name)
+
+        self._build_sweep_graph()
+        self._build_sweep_controls()
+
+    def _build_sweep_graph(self) -> None:
+        graph_container = self._require_child(QWidget, "graphContainer")
+        graph_layout = QVBoxLayout(graph_container)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._sweep_figure = Figure(figsize=(6, 3), tight_layout=True)
+        self._sweep_canvas = FigureCanvas(self._sweep_figure)
+        graph_layout.addWidget(self._sweep_canvas)
+
+        self._sweep_axis = self._sweep_figure.add_subplot(111)
+        self._reset_sweep_plot()
+        self._sweep_canvas.draw()
+
+    def _build_sweep_controls(self) -> None:
+        self._sweep_parameter_combo = self._require_child(
+            QComboBox,
+            "sweepParameterComboBox",
+        )
+        self._sweep_y_axis_combo = self._require_child(QComboBox, "sweepYAxisComboBox")
+        self._sweep_start_edit = self._require_child(QLineEdit, "sweepStartLineEdit")
+        self._sweep_stop_edit = self._require_child(QLineEdit, "sweepStopLineEdit")
+        self._sweep_points_spin_box = self._require_child(QSpinBox, "sweepPointsSpinBox")
+
+        self._sweep_parameter_combo.clear()
+        for field_name, label in SWEEP_PARAMETER_LABELS.items():
+            self._sweep_parameter_combo.addItem(label, field_name)
+
+        self._sweep_y_axis_combo.clear()
+        for field_name in SWEEP_Y_AXIS_NAMES:
+            self._sweep_y_axis_combo.addItem(_format_output_label(field_name), field_name)
+
+    def _reset_sweep_plot(self) -> None:
+        self._sweep_axis.clear()
+        self._sweep_axis.set_title("Sweep result")
+        self._sweep_axis.set_xlabel("Sweep parameter")
+        self._sweep_axis.set_ylabel("Y axis")
+        self._sweep_axis.grid(True)
 
     def _load_ui(self) -> QMainWindow:
         ui_path = Path(__file__).with_name(UI_FILENAME)
@@ -89,14 +248,55 @@ class PlasmaCalculatorWindow:
     def _wire_events(self) -> None:
         run_button = self._require_child(QPushButton, "runCalculationButton")
         reset_button = self._require_child(QPushButton, "resetDefaultsButton")
+        sweep_run_button = self._require_child(QPushButton, "sweepRunButton")
         run_button.clicked.connect(self._run_simulation)
         reset_button.clicked.connect(self._populate_defaults)
+        sweep_run_button.clicked.connect(self._run_sweep)
+        self._sweep_parameter_combo.currentIndexChanged.connect(self._populate_sweep_defaults)
+        self._sweep_y_axis_combo.currentIndexChanged.connect(self._plot_last_sweep)
+        for input_field in self._input_fields.values():
+            input_field.editingFinished.connect(self._populate_sweep_defaults_if_current_input_changed)
 
     def _populate_defaults(self) -> None:
         defaults = FixedInputs()
         for field_name, value in defaults.__dict__.items():
             self._input_fields[field_name].setText(str(value))
         self._result_view.clear()
+        self._clear_last_sweep()
+        self._populate_sweep_defaults()
+        self._reset_sweep_plot()
+        self._sweep_canvas.draw()
+
+    def _populate_sweep_defaults(self, *_: Any) -> None:
+        self._clear_last_sweep()
+        field_name = self._sweep_parameter_combo.currentData()
+        if not field_name:
+            return
+
+        base_value = self._current_input_value_or_default(field_name)
+        start_value = base_value * 0.8
+        stop_value = base_value * 1.2
+        self._sweep_start_edit.setText(f"{start_value:g}")
+        self._sweep_stop_edit.setText(f"{stop_value:g}")
+
+    def _populate_sweep_defaults_if_current_input_changed(self) -> None:
+        sender = self._window.sender()
+        current_sweep_field = self._sweep_parameter_combo.currentData()
+        if not current_sweep_field:
+            return
+        if sender is self._input_fields.get(current_sweep_field):
+            self._populate_sweep_defaults()
+
+    def _current_input_value_or_default(self, field_name: str) -> float:
+        input_widget = self._input_fields.get(field_name)
+        if input_widget is not None:
+            text = input_widget.text().strip()
+            if text:
+                try:
+                    return float(text)
+                except ValueError:
+                    pass
+        return float(getattr(FixedInputs(), field_name))
 
     def _collect_inputs(self) -> FixedInputs:
         values: dict[str, Any] = {}
@@ -116,3 +316,78 @@ class PlasmaCalculatorWindow:
             return
 
         self._result_view.setPlainText(format_simulation_result(result))
+
+    def _collect_sweep_spec(self) -> SweepSpec:
+        variable_name = self._sweep_parameter_combo.currentData()
+        if not variable_name:
+            raise ValueError("Sweep parameter is not selected.")
+
+        start = float(self._sweep_start_edit.text().strip())
+        stop = float(self._sweep_stop_edit.text().strip())
+        points = self._sweep_points_spin_box.value()
+        if start >= stop:
+            raise ValueError("Sweep start must be less than stop.")
+
+        step = (stop - start) / (points - 1)
+        return SweepSpec(
+            variable_name=variable_name,
+            start=start,
+            stop=stop,
+            step=step,
+        )
+
+    def _run_sweep(self) -> None:
+        try:
+            inputs = self._collect_inputs()
+            sweep_spec = self._collect_sweep_spec()
+            y_axis_name = self._sweep_y_axis_combo.currentData()
+            if not y_axis_name:
+                raise ValueError("Y axis is not selected.")
+
+            results = run_parameter_sweep(inputs, sweep_spec)
+        except Exception as exc:
+            QMessageBox.critical(self._window, "Sweep failed", str(exc))
+            return
+
+        self._last_sweep_results = results
+        self._last_sweep_variable_name = sweep_spec.variable_name
+        self._last_sweep_x_label = self._sweep_parameter_combo.currentText()
+        self._last_sweep_x_limits = (sweep_spec.start, sweep_spec.stop)
+        self._plot_last_sweep()
+
+    def _clear_last_sweep(self) -> None:
+        self._last_sweep_results = []
+        self._last_sweep_variable_name = None
+        self._last_sweep_x_label = None
+        self._last_sweep_x_limits = None
+
+    def _plot_last_sweep(self, *_: Any) -> None:
+        if not self._last_sweep_results or self._last_sweep_variable_name is None:
+            return
+
+        y_axis_name = self._sweep_y_axis_combo.currentData()
+        if not y_axis_name:
+            return
+
+        x_values = [
+            getattr(result.inputs, self._last_sweep_variable_name)
+            for result in self._last_sweep_results
+        ]
+        y_values = [
+            _plot_value(result.output_values[y_axis_name])
+            for result in self._last_sweep_results
+        ]
+        x_label = self._last_sweep_x_label or "Sweep parameter"
+        y_label = self._sweep_y_axis_combo.currentText()
+        if any(isinstance(result.output_values[y_axis_name], complex) for result in self._last_sweep_results):
+            y_label = f"{y_label} magnitude"
+
+        self._sweep_axis.clear()
+        self._sweep_axis.plot(x_values, y_values, marker="o")
+        self._sweep_axis.set_title(f"{y_label} vs {x_label}")
+        self._sweep_axis.set_xlabel(x_label)
+        self._sweep_axis.set_ylabel(y_label)
+        if self._last_sweep_x_limits is not None:
+            self._sweep_axis.set_xlim(*self._last_sweep_x_limits)
+        self._sweep_axis.grid(True)
+        self._sweep_canvas.draw()

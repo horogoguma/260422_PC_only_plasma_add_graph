@@ -257,11 +257,7 @@ class PlasmaCalculator:
         chamber_height_m = chamber.chamber_height_m
         sheath_voltage = conditions.sheath_voltage
         rf_power = conditions.RF_power
-        absorbed_bulk_power_w = (
-            conditions.absorbed_bulk_power_w
-            if conditions.absorbed_bulk_power_w is not None
-            else rf_power
-        )
+        absorbed_bulk_power_w = rf_power
         rf_frequency = conditions.RF_frequency
         
         sheath_length_electrode_m = conditions.sheath_length_electrode_m
@@ -947,7 +943,11 @@ class PlasmaCalculator:
         )
         if bulk_height_m <= 0:
             raise ValueError(
-                "Bulk plasma height must be positive after subtracting both sheath lengths."
+                "Bulk plasma height must be positive after subtracting both sheath lengths. "
+                f"chamber_height={chamber_height_m / MM_TO_M:g} mm, "
+                f"electrode_sheath={sheath_length_electrode_m / MM_TO_M:g} mm, "
+                f"grounded_sheath={sheath_length_grounded_m / MM_TO_M:g} mm, "
+                f"bulk_height={bulk_height_m / MM_TO_M:g} mm."
             )
         return bulk_height_m
 
