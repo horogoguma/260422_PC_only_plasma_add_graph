@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from src.coupled_solver import solve_self_consistent_plasma_circuit
 from src.plasma import PlasmaCalculator
 from src.plasma.constants import MM_TO_M
@@ -171,10 +173,15 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
 def run_parameter_sweep(
     fixed_inputs: FixedInputs,
     sweep_spec: SweepSpec,
+    progress_callback: Callable[[int, int, float], None] | None = None,
 ) -> list[SimulationResult]:
     """Run a one-dimensional sweep while keeping all other inputs fixed."""
     results: list[SimulationResult] = []
-    for sweep_value in sweep_spec.values():
+    sweep_values = sweep_spec.values()
+    total_points = len(sweep_values)
+    for index, sweep_value in enumerate(sweep_values, start=1):
         run_inputs = fixed_inputs.with_value(sweep_spec.variable_name, sweep_value)
         results.append(run_single_simulation(run_inputs))
+        if progress_callback is not None:
+            progress_callback(index, total_points, sweep_value)
     return results

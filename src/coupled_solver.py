@@ -62,9 +62,9 @@ def solve_self_consistent_plasma_circuit(
     min_iterations: int = 30,
     min_sheath_hold_iterations: int = 20,
     max_sheath_hold_iterations: int = 60,
-    pre_sheath_relative_tolerance: float = 1e-4,
+    pre_sheath_relative_tolerance: float = 1e-2,
     pre_sheath_stable_iterations: int = 5,
-    relative_tolerance: float = 1e-6,
+    relative_tolerance: float = 1e-2,
     damping: float = 0.5,
     sheath_damping: float = 0.05,
 ) -> SelfConsistentPlasmaCircuitResult:

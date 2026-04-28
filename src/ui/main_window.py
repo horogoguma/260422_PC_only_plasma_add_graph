@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import QFile
 from PySide6.QtUiTools import QUiLoader
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QLabel,
     QLineEdit,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -154,6 +156,11 @@ class PlasmaCalculatorWindow:
         self._sweep_canvas: FigureCanvas
         self._sweep_figure: Figure
         self._sweep_axis: Any
+        self._run_button: QPushButton
+        self._reset_button: QPushButton
+        self._sweep_run_button: QPushButton
+        self._status_bar: QStatusBar | None = None
+        self._is_busy = False
         self._last_sweep_results: list[SimulationResult] = []
         self._last_sweep_variable_name: str | None = None
         self._last_sweep_x_label: str | None = None
@@ -168,6 +175,7 @@ class PlasmaCalculatorWindow:
         self._window = self._load_ui()
 
         self._result_view = self._require_child(QPlainTextEdit, "resultTextEdit")
+        self._status_bar = self._window.findChild(QStatusBar, "statusbar")
         self._set_label_text("inputsLabel", "Inputs")
         self._set_label_text("resultsTitleLabel", "Results")
 
@@ -246,12 +254,12 @@ class PlasmaCalculatorWindow:
             label.setText(text)
 
     def _wire_events(self) -> None:
-        run_button = self._require_child(QPushButton, "runCalculationButton")
-        reset_button = self._require_child(QPushButton, "resetDefaultsButton")
-        sweep_run_button = self._require_child(QPushButton, "sweepRunButton")
-        run_button.clicked.connect(self._run_simulation)
-        reset_button.clicked.connect(self._populate_defaults)
-        sweep_run_button.clicked.connect(self._run_sweep)
+        self._run_button = self._require_child(QPushButton, "runCalculationButton")
+        self._reset_button = self._require_child(QPushButton, "resetDefaultsButton")
+        self._sweep_run_button = self._require_child(QPushButton, "sweepRunButton")
+        self._run_button.clicked.connect(self._run_simulation)
+        self._reset_button.clicked.connect(self._populate_defaults)
+        self._sweep_run_button.clicked.connect(self._run_sweep)
         self._sweep_parameter_combo.currentIndexChanged.connect(self._populate_sweep_defaults)
         self._sweep_y_axis_combo.currentIndexChanged.connect(self._plot_last_sweep)
         for input_field in self._input_fields.values():
@@ -262,6 +270,7 @@ class PlasmaCalculatorWindow:
         for field_name, value in defaults.__dict__.items():
             self._input_fields[field_name].setText(str(value))
         self._result_view.clear()
+        self._set_status("Ready")
         self._clear_last_sweep()
         self._populate_sweep_defaults()
         self._reset_sweep_plot()
@@ -308,14 +317,30 @@ class PlasmaCalculatorWindow:
         return FixedInputs(**values)
 
     def _run_simulation(self) -> None:
+        if self._is_busy:
+            QMessageBox.information(self._window, "Busy", "Another calculation is already in progress.")
+            return
+
         try:
             inputs = self._collect_inputs()
-            result = run_single_simulation(inputs)
         except Exception as exc:
             QMessageBox.critical(self._window, "Simulation failed", str(exc))
             return
 
+        self._set_simulation_running(True)
+        QApplication.processEvents()
+
+        try:
+            result = run_single_simulation(inputs)
+        except Exception as exc:
+            self._set_status("Calculation failed")
+            QMessageBox.critical(self._window, "Simulation failed", str(exc))
+            self._set_simulation_running(False)
+            return
+
         self._result_view.setPlainText(format_simulation_result(result))
+        self._set_status("Calculation finished")
+        self._set_simulation_running(False)
 
     def _collect_sweep_spec(self) -> SweepSpec:
         variable_name = self._sweep_parameter_combo.currentData()
@@ -337,23 +362,82 @@ class PlasmaCalculatorWindow:
         )
 
     def _run_sweep(self) -> None:
+        if self._is_busy:
+            QMessageBox.information(self._window, "Busy", "Another calculation is already in progress.")
+            return
+
         try:
             inputs = self._collect_inputs()
             sweep_spec = self._collect_sweep_spec()
             y_axis_name = self._sweep_y_axis_combo.currentData()
             if not y_axis_name:
                 raise ValueError("Y axis is not selected.")
-
-            results = run_parameter_sweep(inputs, sweep_spec)
         except Exception as exc:
             QMessageBox.critical(self._window, "Sweep failed", str(exc))
             return
 
+        self._set_sweep_running(True)
+        self._last_sweep_x_label = self._sweep_parameter_combo.currentText()
+        total_points = len(sweep_spec.values())
+        self._result_view.setPlainText(f"Running sweep...\n0 / {total_points} points completed.")
+        QApplication.processEvents()
+
+        try:
+            results = run_parameter_sweep(
+                inputs,
+                sweep_spec,
+                progress_callback=self._handle_sweep_progress,
+            )
+        except Exception as exc:
+            self._set_status("Sweep failed")
+            QMessageBox.critical(self._window, "Sweep failed", str(exc))
+            self._set_sweep_running(False)
+            return
+
         self._last_sweep_results = results
         self._last_sweep_variable_name = sweep_spec.variable_name
-        self._last_sweep_x_label = self._sweep_parameter_combo.currentText()
         self._last_sweep_x_limits = (sweep_spec.start, sweep_spec.stop)
+        self._result_view.appendPlainText("Sweep finished.")
+        self._set_status("Sweep finished")
         self._plot_last_sweep()
+        self._set_sweep_running(False)
+
+    def _handle_sweep_progress(self, index: int, total: int, sweep_value: float) -> None:
+        self._sweep_run_button.setText(f"Running... ({index}/{total})")
+        self._result_view.setPlainText(
+            "Running sweep...\n"
+            f"{index} / {total} points completed.\n"
+            f"Current sweep value: {sweep_value:g}"
+        )
+        self._set_status(f"Sweep calculation in progress... ({index}/{total})")
+        QApplication.processEvents()
+
+    def _set_sweep_running(self, is_running: bool) -> None:
+        self._is_busy = is_running
+        self._run_button.setEnabled(not is_running)
+        self._reset_button.setEnabled(not is_running)
+        self._sweep_run_button.setEnabled(not is_running)
+        if is_running:
+            self._sweep_run_button.setText("Running...")
+            self._set_status("Sweep calculation in progress...")
+        else:
+            self._sweep_run_button.setText("Run sweep")
+
+    def _set_simulation_running(self, is_running: bool) -> None:
+        self._is_busy = is_running
+        self._run_button.setEnabled(not is_running)
+        self._reset_button.setEnabled(not is_running)
+        self._sweep_run_button.setEnabled(not is_running)
+        if is_running:
+            self._run_button.setText("Calculating...")
+            self._result_view.setPlainText("Calculation in progress...\nPlease wait.")
+            self._set_status("Single calculation in progress...")
+        else:
+            self._run_button.setText("Run calculation")
+
+    def _set_status(self, message: str) -> None:
+        if self._status_bar is not None:
+            self._status_bar.showMessage(message)
 
     def _clear_last_sweep(self) -> None:
         self._last_sweep_results = []
