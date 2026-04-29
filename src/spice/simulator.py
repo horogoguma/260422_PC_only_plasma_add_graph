@@ -19,8 +19,6 @@ from PySpice.Unit import *
 logger = Logging.setup_logging()
 initialize_pyspice()
 
-SHEATH_DC_BLEED_RESISTANCE_OHM = 1e12
-
 
 @dataclass(frozen=True)
 class PlasmaCircuitParameters:
@@ -102,8 +100,8 @@ class SpiceSimulator:
         """플라즈마 bulk + sheath 등가회로를 생성한다.
 
         토폴로지:
-        source -> electrode sheath(R-C 직렬) -> bulk plasma(R-L 직렬 // C)
-        -> grounded sheath(C-R 직렬) -> ground
+        source -> electrode sheath(R // C) -> bulk plasma(R-L 직렬 // C)
+        -> grounded sheath(R // C) -> ground
         """
         self._plasma_params = params
         self._target_power_w = target_power_w
@@ -136,20 +134,14 @@ class SpiceSimulator:
         self.circuit.R(
             "sheath_e_r",
             "src",
-            "node_e_r",
+            "node_e",
             params.plasma_sheath_resistance_electrode @ u_Ohm,
         )
         self.circuit.C(
             "sheath_e_c",
-            "node_e_r",
+            "src",
             "node_e",
             params.plasma_sheath_capacitance_electrode @ u_F,
-        )
-        self.circuit.R(
-            "sheath_e_bleed",
-            "node_e_r",
-            "node_e",
-            SHEATH_DC_BLEED_RESISTANCE_OHM @ u_Ohm,
         )
         self.circuit.R(
             "bulk_r",
@@ -172,18 +164,12 @@ class SpiceSimulator:
         self.circuit.C(
             "sheath_g_c",
             "node_g",
-            "node_g_r",
+            self.circuit.gnd,
             params.plasma_sheath_capacitance_grounded @ u_F,
         )
         self.circuit.R(
-            "sheath_g_bleed",
-            "node_g",
-            "node_g_r",
-            SHEATH_DC_BLEED_RESISTANCE_OHM @ u_Ohm,
-        )
-        self.circuit.R(
             "sheath_g_r",
-            "node_g_r",
+            "node_g",
             self.circuit.gnd,
             params.plasma_sheath_resistance_grounded @ u_Ohm,
         )
@@ -273,35 +259,22 @@ class SpiceSimulator:
             params.plasma_sheath_capacitance_electrode,
             omega,
         )
-        grounded_cap_impedance = self._capacitive_impedance(
-            params.plasma_sheath_capacitance_grounded,
-            omega,
+        src_node_resistor_current_rms = (
+            electrode_sheath_voltage_rms / params.plasma_sheath_resistance_electrode
         )
-        electrode_sheath_series_impedance = (
-            complex(params.plasma_sheath_resistance_electrode, 0.0)
-            + electrode_cap_impedance
+        src_node_capacitor_current_rms = (
+            electrode_sheath_voltage_rms / electrode_cap_impedance
         )
-        grounded_sheath_series_impedance = (
-            grounded_cap_impedance
-            + complex(params.plasma_sheath_resistance_grounded, 0.0)
+        src_node_current_rms = (
+            src_node_resistor_current_rms + src_node_capacitor_current_rms
         )
-        bulk_series_impedance = (
-            complex(params.plasma_resistance, 0.0)
-            + self._inductive_impedance(params.plasma_coil_henry, omega)
-        )
-
-        src_node_current_rms = electrode_sheath_voltage_rms / electrode_sheath_series_impedance
-        src_node_resistor_current_rms = src_node_current_rms
-        src_node_capacitor_current_rms = src_node_current_rms
         source_current_rms = src_node_current_rms
         if source_current_rms == 0:
             raise ValueError("Source current must be non-zero.")
-        bulk_series_current_rms = bulk_voltage_rms / bulk_series_impedance
-        grounded_sheath_current_rms = grounded_sheath_voltage_rms / grounded_sheath_series_impedance
 
         electrode_sheath_resistor_power_w = float(
             np.mean(
-                (steady_state["electrode_sheath_series_current"] ** 2)
+                (steady_state["electrode_sheath_resistor_current"] ** 2)
                 * params.plasma_sheath_resistance_electrode
             )
         )
@@ -310,7 +283,7 @@ class SpiceSimulator:
         )
         grounded_sheath_resistor_power_w = float(
             np.mean(
-                (steady_state["grounded_sheath_series_current"] ** 2)
+                (steady_state["grounded_sheath_resistor_current"] ** 2)
                 * params.plasma_sheath_resistance_grounded
             )
         )
@@ -369,9 +342,7 @@ class SpiceSimulator:
             raise ValueError("Failed to capture a steady-state transient window.")
         source_voltage = np.array(analysis.nodes["src"], dtype=float)[mask]
         node_e_voltage = np.array(analysis.nodes["node_e"], dtype=float)[mask]
-        node_e_r_voltage = np.array(analysis.nodes["node_e_r"], dtype=float)[mask]
         node_g_voltage = np.array(analysis.nodes["node_g"], dtype=float)[mask]
-        node_g_r_voltage = np.array(analysis.nodes["node_g_r"], dtype=float)[mask]
         return {
             "time": time[mask],
             "source_voltage": source_voltage,
@@ -379,18 +350,15 @@ class SpiceSimulator:
             # power delivered from the RF source into the plasma circuit.
             "source_current": -np.array(analysis.branches["vinput"], dtype=float)[mask],
             "node_e_voltage": node_e_voltage,
-            "node_e_r_voltage": node_e_r_voltage,
             "node_g_voltage": node_g_voltage,
-            "node_g_r_voltage": node_g_r_voltage,
             "electrode_sheath_voltage": source_voltage - node_e_voltage,
             "grounded_sheath_voltage": node_g_voltage,
-            "electrode_sheath_series_current": (
-                (source_voltage - node_e_r_voltage)
+            "electrode_sheath_resistor_current": (
+                (source_voltage - node_e_voltage)
                 / self._plasma_params.plasma_sheath_resistance_electrode
             ),
-            "grounded_sheath_series_current": (
-                node_g_r_voltage
-                / self._plasma_params.plasma_sheath_resistance_grounded
+            "grounded_sheath_resistor_current": (
+                node_g_voltage / self._plasma_params.plasma_sheath_resistance_grounded
             ),
             # The bulk resistor and inductor are in series, so the inductor
             # branch current is also the resistor current.
@@ -411,12 +379,12 @@ class SpiceSimulator:
         params: PlasmaCircuitParameters,
     ) -> dict[str, float | complex]:
         omega = 2 * pi * params.rf_frequency_hz
-        electrode_sheath_impedance = (
-            complex(params.plasma_sheath_resistance_electrode, 0.0)
-            + self._capacitive_impedance(
+        electrode_sheath_impedance = self._parallel_impedance(
+            complex(params.plasma_sheath_resistance_electrode, 0.0),
+            self._capacitive_impedance(
                 params.plasma_sheath_capacitance_electrode,
                 omega,
-            )
+            ),
         )
         bulk_series_impedance = (
             complex(params.plasma_resistance, 0.0)
@@ -430,12 +398,12 @@ class SpiceSimulator:
             bulk_series_impedance,
             bulk_capacitive_impedance,
         )
-        grounded_sheath_impedance = (
+        grounded_sheath_impedance = self._parallel_impedance(
+            complex(params.plasma_sheath_resistance_grounded, 0.0),
             self._capacitive_impedance(
                 params.plasma_sheath_capacitance_grounded,
                 omega,
-            )
-            + complex(params.plasma_sheath_resistance_grounded, 0.0)
+            ),
         )
         total_impedance = (
             electrode_sheath_impedance

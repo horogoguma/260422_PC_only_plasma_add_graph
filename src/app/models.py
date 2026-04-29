@@ -36,7 +36,7 @@ class FixedInputs:
     pressure_torr: float = 3.5
     temperature_k: float = 700.0
     electrode_radius_mm: float = 170.0
-    electron_temperature_ev: float = 2.4
+    electron_temperature_ev: float = 1
     sheath_voltage: float = 100.0
     sheath_length_electrode_mm: float = 0.5
     sheath_length_grounded_mm: float = 0.5

@@ -10,7 +10,7 @@ def main() -> None:
         electrode_radius_mm=170.0,
         pressure_torr=3.5,
         temperature_k=700.0,
-        electron_temperature_ev=2.4,
+        electron_temperature_ev=1,
         sheath_voltage=100.0,
         sheath_length_electrode_mm=0.5,
         sheath_length_grounded_mm=0.5,

@@ -616,6 +616,8 @@ class PlasmaCalculator:
             + 2 * pi * chamber_radius_m * chamber_height_m * 0.61
         )
 
+    #heuristic
+
     def compute_effective_length(
         self,
         chamber_radius_m: float,
@@ -938,8 +940,8 @@ class PlasmaCalculator:
 
         bulk_height_m = (
             chamber_height_m
-            - sheath_length_electrode_m
-            - sheath_length_grounded_m
+            - 0.606*sheath_length_electrode_m
+            - 0.606*sheath_length_grounded_m
         )
         if bulk_height_m <= 0:
             raise ValueError(
