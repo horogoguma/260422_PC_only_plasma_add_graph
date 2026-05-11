@@ -14,7 +14,7 @@ def main() -> None:
         sheath_voltage=100.0,
         sheath_length_electrode_mm=0.5,
         sheath_length_grounded_mm=0.5,
-        rf_power=900.0,
+        rf_power=100.0,
         rf_frequency=12.9e6,
     )
     result = run_single_simulation(inputs)

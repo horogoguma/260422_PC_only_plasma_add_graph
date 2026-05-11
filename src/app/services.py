@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from src.coupled_solver import solve_self_consistent_plasma_circuit
+from src.coupled_solver import (
+    CoupledSolverConvergenceError,
+    solve_self_consistent_plasma_circuit,
+)
 from src.plasma import PlasmaCalculator
 from src.plasma.constants import MM_TO_M
 from src.spice import SpiceSimulator
@@ -26,6 +29,8 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         simulator=simulator,
         chamber=chamber,
         plasma_conditions=plasma_conditions,
+        rf_drive_mode=inputs.rf_drive_mode,
+        target_current_rms_a=inputs.rf_current_rms,
     )
     plasma_result = coupled_result.plasma_result
     circuit_result = coupled_result.circuit_result
@@ -36,12 +41,13 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         - coupled_result.sheath_length_electrode_m
         - coupled_result.sheath_length_grounded_m
     )
+    effective_rf_power_w = circuit_result.target_power_w
     plasma_voltage_bias = plasma.compute_plasma_voltage_bias(
         current_density_a_per_m2=coupled_result.current_density_a_per_m2,
         rf_frequency_hz=plasma_conditions.RF_frequency,
         pressure_torr=chamber.pressure_torr,
         electron_temperature_ev=plasma_result.electron_temperature_ev,
-        rf_power=plasma_conditions.RF_power,
+        rf_power=effective_rf_power_w,
         sheath_length_m=coupled_result.sheath_length_electrode_m,
         electrode_radius_m=electrode_radius_m,
         chamber_radius_m=chamber.chamber_radius_m,
@@ -53,7 +59,7 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         rf_frequency_hz=plasma_conditions.RF_frequency,
         pressure_torr=chamber.pressure_torr,
         electron_temperature_ev=plasma_result.electron_temperature_ev,
-        rf_power=plasma_conditions.RF_power,
+        rf_power=effective_rf_power_w,
         sheath_length_m=coupled_result.sheath_length_electrode_m,
         electrode_radius_m=electrode_radius_m,
         chamber_radius_m=chamber.chamber_radius_m,
@@ -65,7 +71,7 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         rf_frequency_hz=plasma_conditions.RF_frequency,
         pressure_torr=chamber.pressure_torr,
         electron_temperature_ev=plasma_result.electron_temperature_ev,
-        rf_power=plasma_conditions.RF_power,
+        rf_power=effective_rf_power_w,
         sheath_length_m=coupled_result.sheath_length_grounded_m,
         electrode_radius_m=electrode_radius_m,
         chamber_radius_m=chamber.chamber_radius_m,
@@ -77,7 +83,7 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         rf_frequency_hz=plasma_conditions.RF_frequency,
         pressure_torr=chamber.pressure_torr,
         electron_temperature_ev=plasma_result.electron_temperature_ev,
-        rf_power=plasma_conditions.RF_power,
+        rf_power=effective_rf_power_w,
         sheath_length_m=coupled_result.sheath_length_electrode_m,
         electrode_radius_m=electrode_radius_m,
         chamber_radius_m=chamber.chamber_radius_m,
@@ -90,6 +96,8 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         "electron_temperature_iterations": plasma_result.electron_temperature_iterations,
         "coupled_converged": coupled_result.converged,
         "coupled_iterations": coupled_result.iterations,
+        "rf_drive_mode_is_current": inputs.rf_drive_mode == "current",
+        "rf_current_rms_setpoint_a": inputs.rf_current_rms,
         "sheath_length_relative_change": coupled_result.sheath_length_relative_change,
         "sheath_voltage_relative_change": coupled_result.sheath_voltage_relative_change,
         "bulk_power_relative_change": coupled_result.bulk_power_relative_change,
@@ -139,6 +147,11 @@ def run_single_simulation(inputs: FixedInputs) -> SimulationResult:
         "plasma_sheath_resistance_grounded_ohm": plasma_result.plasma_sheath_resistance_grounded,
         "plasma_wall_potential_v": plasma_result.plasma_wall_potential,
         "plasma_target_power_w": circuit_result.target_power_w,
+        "plasma_target_current_rms_a": (
+            circuit_result.target_current_rms_a
+            if circuit_result.target_current_rms_a is not None
+            else 0.0
+        ),
         "plasma_source_voltage_peak_v": circuit_result.source_voltage_peak,
         "plasma_source_voltage_rms_v": circuit_result.source_voltage_rms,
         "plasma_voltage_bias_v": plasma_voltage_bias,
@@ -181,7 +194,14 @@ def run_parameter_sweep(
     total_points = len(sweep_values)
     for index, sweep_value in enumerate(sweep_values, start=1):
         run_inputs = fixed_inputs.with_value(sweep_spec.variable_name, sweep_value)
-        results.append(run_single_simulation(run_inputs))
+        try:
+            results.append(run_single_simulation(run_inputs))
+        except CoupledSolverConvergenceError as exc:
+            raise CoupledSolverConvergenceError(
+                "Sweep stopped because the calculation did not converge at "
+                f"{sweep_spec.variable_name}={sweep_value:g} "
+                f"(point {index} of {total_points}). {exc}"
+            ) from exc
         if progress_callback is not None:
             progress_callback(index, total_points, sweep_value)
     return results

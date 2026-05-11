@@ -2,6 +2,7 @@
 
 from .formatters import format_simulation_result
 from .models import (
+    RF_DRIVE_MODES,
     SWEEPABLE_INPUT_FIELDS,
     FixedInputs,
     SimulationResult,
@@ -10,6 +11,7 @@ from .models import (
 from .services import run_parameter_sweep, run_single_simulation
 
 __all__ = [
+    "RF_DRIVE_MODES",
     "SWEEPABLE_INPUT_FIELDS",
     "FixedInputs",
     "SimulationResult",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.plasma import ChamberConditions, PlasmaConditions
 
@@ -18,8 +18,12 @@ SWEEPABLE_INPUT_FIELDS = (
     "pressure_torr",
     "electrode_radius_mm",
     "rf_power",
+    "rf_current_rms",
     "rf_frequency",
 )
+
+RF_DRIVE_MODES = ("power", "current")
+RFDriveMode = Literal["power", "current"]
 
 
 @dataclass(frozen=True)
@@ -40,10 +44,16 @@ class FixedInputs:
     sheath_voltage: float = 100.0
     sheath_length_electrode_mm: float = 0.5
     sheath_length_grounded_mm: float = 0.5
-    rf_power: float = 900.0
+    rf_drive_mode: RFDriveMode = "power"
+    rf_power: float = 100.0
+    rf_current_rms: float = 1.0
     rf_frequency: float = 12.9e6
 
     def __post_init__(self) -> None:
+        if self.rf_drive_mode not in RF_DRIVE_MODES:
+            raise ValueError(
+                f"rf_drive_mode must be one of: {', '.join(RF_DRIVE_MODES)}."
+            )
         positive_fields = (
             "chamber_height_mm",
             "chamber_radius_mm",
@@ -55,6 +65,7 @@ class FixedInputs:
             "sheath_length_electrode_mm",
             "sheath_length_grounded_mm",
             "rf_power",
+            "rf_current_rms",
             "rf_frequency",
         )
         for field_name in positive_fields:

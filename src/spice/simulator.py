@@ -9,6 +9,7 @@ from ..infra import initialize_pyspice
 
 from dataclasses import dataclass
 from math import pi
+from typing import Literal
 
 import numpy as np
 
@@ -18,6 +19,8 @@ from PySpice.Unit import *
 
 logger = Logging.setup_logging()
 initialize_pyspice()
+
+DriveMode = Literal["power", "current"]
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,9 @@ class PlasmaCircuitResult:
     """주파수 한 점에서 계산한 플라즈마 등가회로 결과."""
 
     angular_frequency: float
+    drive_mode: DriveMode
     target_power_w: float
+    target_current_rms_a: float | None
     source_voltage_rms: complex
     source_voltage_peak: complex
     source_current_rms: complex
@@ -82,7 +87,9 @@ class SpiceSimulator:
         # 초기 상태의 회로 객체
         self.circuit = None
         self._plasma_params = None
+        self._drive_mode: DriveMode | None = None
         self._target_power_w = None
+        self._target_current_rms_a = None
         self._source_voltage_peak_v = None
         self._power_relative_tolerance = 1e-4
         self._power_match_max_iterations = 12
@@ -100,14 +107,41 @@ class SpiceSimulator:
         """플라즈마 bulk + sheath 등가회로를 생성한다.
 
         토폴로지:
-        source -> electrode sheath(R // C) -> bulk plasma(R-L 직렬 // C)
-        -> grounded sheath(R // C) -> ground
+        source -> electrode sheath(R-C 직렬) -> bulk plasma(R-L 직렬 // C)
+        -> grounded sheath(R-C 직렬) -> ground
         """
         self._plasma_params = params
+        self._drive_mode = "power"
         self._target_power_w = target_power_w
+        self._target_current_rms_a = None
         equivalent = self._compute_equivalent_impedances(params)
         source_voltage_rms_v = self._solve_source_voltage_rms(
             target_power_w,
+            equivalent["total_impedance"],
+        )
+        source_voltage_peak_v = source_voltage_rms_v * (2 ** 0.5)
+        self._source_voltage_peak_v = source_voltage_peak_v
+        self._build_circuit_for_source_voltage(
+            params=params,
+            source_voltage_peak_v=source_voltage_peak_v,
+        )
+
+    def build_plasma_equivalent_circuit_for_current(
+        self,
+        params: PlasmaCircuitParameters,
+        target_current_rms_a: float,
+    ):
+        """Build the equivalent circuit with source voltage set by RF current."""
+        if target_current_rms_a <= 0:
+            raise ValueError("Target current must be positive.")
+
+        self._plasma_params = params
+        self._drive_mode = "current"
+        self._target_power_w = None
+        self._target_current_rms_a = target_current_rms_a
+        equivalent = self._compute_equivalent_impedances(params)
+        source_voltage_rms_v = self._solve_source_voltage_rms_for_current(
+            target_current_rms_a,
             equivalent["total_impedance"],
         )
         source_voltage_peak_v = source_voltage_rms_v * (2 ** 0.5)
@@ -134,12 +168,12 @@ class SpiceSimulator:
         self.circuit.R(
             "sheath_e_r",
             "src",
-            "node_e",
+            "node_e_sheath_mid",
             params.plasma_sheath_resistance_electrode @ u_Ohm,
         )
         self.circuit.C(
             "sheath_e_c",
-            "src",
+            "node_e_sheath_mid",
             "node_e",
             params.plasma_sheath_capacitance_electrode @ u_F,
         )
@@ -163,14 +197,14 @@ class SpiceSimulator:
         )
         self.circuit.C(
             "sheath_g_c",
-            "node_g",
+            "node_g_sheath_mid",
             self.circuit.gnd,
             params.plasma_sheath_capacitance_grounded @ u_F,
         )
         self.circuit.R(
             "sheath_g_r",
             "node_g",
-            self.circuit.gnd,
+            "node_g_sheath_mid",
             params.plasma_sheath_resistance_grounded @ u_Ohm,
         )
 
@@ -180,11 +214,10 @@ class SpiceSimulator:
             raise ValueError("Plasma equivalent circuit must be built first.")
         if self._source_voltage_peak_v is None:
             raise ValueError("Source voltage must be set before analysis.")
-        if self._target_power_w is None:
-            raise ValueError("Target power must be set before analysis.")
+        if self._drive_mode is None:
+            raise ValueError("RF drive mode must be set before analysis.")
 
         params = self._plasma_params
-        target_power_w = self._target_power_w
         source_voltage_peak_v = self._source_voltage_peak_v
         latest_result: PlasmaCircuitResult | None = None
 
@@ -193,25 +226,44 @@ class SpiceSimulator:
                 params=params,
                 source_voltage_peak_v=source_voltage_peak_v,
             )
-            measured_power_w = latest_result.total_resistor_power_w
-            if measured_power_w <= 0:
-                raise ValueError("Measured dissipated resistor power must be positive.")
-
-            relative_error = abs(measured_power_w - target_power_w) / target_power_w
+            measured_value, target_value = self._matched_drive_values(latest_result)
+            relative_error = abs(measured_value - target_value) / target_value
             if relative_error <= self._power_relative_tolerance:
                 self._source_voltage_peak_v = source_voltage_peak_v
                 return latest_result
 
-            source_voltage_peak_v *= (target_power_w / measured_power_w) ** 0.5
+            if self._drive_mode == "power":
+                source_voltage_peak_v *= (target_value / measured_value) ** 0.5
+            else:
+                source_voltage_peak_v *= target_value / measured_value
 
         if latest_result is None:
-            raise RuntimeError("Power-matching loop did not produce a circuit result.")
+            raise RuntimeError("Drive-matching loop did not produce a circuit result.")
 
         self._source_voltage_peak_v = source_voltage_peak_v
         return self._compute_response_for_source_voltage(
             params=params,
             source_voltage_peak_v=source_voltage_peak_v,
         )
+
+    def _matched_drive_values(self, result: PlasmaCircuitResult) -> tuple[float, float]:
+        if self._drive_mode == "power":
+            if self._target_power_w is None:
+                raise ValueError("Target power must be set before analysis.")
+            measured_power_w = result.total_resistor_power_w
+            if measured_power_w <= 0:
+                raise ValueError("Measured dissipated resistor power must be positive.")
+            return measured_power_w, self._target_power_w
+
+        if self._drive_mode == "current":
+            if self._target_current_rms_a is None:
+                raise ValueError("Target current must be set before analysis.")
+            measured_current_rms_a = abs(result.source_current_rms)
+            if measured_current_rms_a <= 0:
+                raise ValueError("Measured source current must be positive.")
+            return measured_current_rms_a, self._target_current_rms_a
+
+        raise ValueError("RF drive mode must be set before analysis.")
 
     def _compute_response_for_source_voltage(
         self,
@@ -255,23 +307,18 @@ class SpiceSimulator:
         bulk_voltage_rms = node_e_rms - node_g_rms
         grounded_sheath_voltage_rms = node_g_rms
 
-        electrode_cap_impedance = self._capacitive_impedance(
-            params.plasma_sheath_capacitance_electrode,
-            omega,
+        source_current_peak = self._compute_peak_phasor(
+            steady_state["time"],
+            steady_state["source_current"],
+            params.rf_frequency_hz,
         )
-        src_node_resistor_current_rms = (
-            electrode_sheath_voltage_rms / params.plasma_sheath_resistance_electrode
-        )
-        src_node_capacitor_current_rms = (
-            electrode_sheath_voltage_rms / electrode_cap_impedance
-        )
-        src_node_current_rms = (
-            src_node_resistor_current_rms + src_node_capacitor_current_rms
-        )
-        source_current_rms = src_node_current_rms
+        source_current_rms = source_current_peak / (2 ** 0.5)
         if source_current_rms == 0:
             raise ValueError("Source current must be non-zero.")
 
+        src_node_current_rms = source_current_rms
+        src_node_resistor_current_rms = source_current_rms
+        src_node_capacitor_current_rms = source_current_rms
         electrode_sheath_resistor_power_w = float(
             np.mean(
                 (steady_state["electrode_sheath_resistor_current"] ** 2)
@@ -302,7 +349,13 @@ class SpiceSimulator:
 
         return PlasmaCircuitResult(
             angular_frequency=omega,
-            target_power_w=self._target_power_w,
+            drive_mode=self._drive_mode or "power",
+            target_power_w=(
+                self._target_power_w
+                if self._target_power_w is not None
+                else total_resistor_power_w
+            ),
+            target_current_rms_a=self._target_current_rms_a,
             source_voltage_rms=source_voltage_rms,
             source_voltage_peak=source_voltage_peak,
             source_current_rms=source_current_rms,
@@ -335,6 +388,7 @@ class SpiceSimulator:
         analysis = simulator.transient(
             step_time=step_time_s,
             end_time=measurement_stop_s,
+            use_initial_condition=True,
         )
         time = np.array(analysis.time, dtype=float)
         mask = time >= measurement_start_s
@@ -343,6 +397,14 @@ class SpiceSimulator:
         source_voltage = np.array(analysis.nodes["src"], dtype=float)[mask]
         node_e_voltage = np.array(analysis.nodes["node_e"], dtype=float)[mask]
         node_g_voltage = np.array(analysis.nodes["node_g"], dtype=float)[mask]
+        node_e_sheath_mid_voltage = np.array(
+            analysis.nodes["node_e_sheath_mid"],
+            dtype=float,
+        )[mask]
+        node_g_sheath_mid_voltage = np.array(
+            analysis.nodes["node_g_sheath_mid"],
+            dtype=float,
+        )[mask]
         return {
             "time": time[mask],
             "source_voltage": source_voltage,
@@ -354,11 +416,12 @@ class SpiceSimulator:
             "electrode_sheath_voltage": source_voltage - node_e_voltage,
             "grounded_sheath_voltage": node_g_voltage,
             "electrode_sheath_resistor_current": (
-                (source_voltage - node_e_voltage)
+                (source_voltage - node_e_sheath_mid_voltage)
                 / self._plasma_params.plasma_sheath_resistance_electrode
             ),
             "grounded_sheath_resistor_current": (
-                node_g_voltage / self._plasma_params.plasma_sheath_resistance_grounded
+                (node_g_voltage - node_g_sheath_mid_voltage)
+                / self._plasma_params.plasma_sheath_resistance_grounded
             ),
             # The bulk resistor and inductor are in series, so the inductor
             # branch current is also the resistor current.
@@ -379,12 +442,12 @@ class SpiceSimulator:
         params: PlasmaCircuitParameters,
     ) -> dict[str, float | complex]:
         omega = 2 * pi * params.rf_frequency_hz
-        electrode_sheath_impedance = self._parallel_impedance(
-            complex(params.plasma_sheath_resistance_electrode, 0.0),
-            self._capacitive_impedance(
+        electrode_sheath_impedance = (
+            complex(params.plasma_sheath_resistance_electrode, 0.0)
+            + self._capacitive_impedance(
                 params.plasma_sheath_capacitance_electrode,
                 omega,
-            ),
+            )
         )
         bulk_series_impedance = (
             complex(params.plasma_resistance, 0.0)
@@ -398,12 +461,12 @@ class SpiceSimulator:
             bulk_series_impedance,
             bulk_capacitive_impedance,
         )
-        grounded_sheath_impedance = self._parallel_impedance(
-            complex(params.plasma_sheath_resistance_grounded, 0.0),
-            self._capacitive_impedance(
+        grounded_sheath_impedance = (
+            complex(params.plasma_sheath_resistance_grounded, 0.0)
+            + self._capacitive_impedance(
                 params.plasma_sheath_capacitance_grounded,
                 omega,
-            ),
+            )
         )
         total_impedance = (
             electrode_sheath_impedance
@@ -433,6 +496,18 @@ class SpiceSimulator:
         if conductance <= 0:
             raise ValueError("Total plasma circuit must dissipate positive real power.")
         return (target_power_w / conductance) ** 0.5
+
+    def _solve_source_voltage_rms_for_current(
+        self,
+        target_current_rms_a: float,
+        total_impedance: complex,
+    ) -> float:
+        if target_current_rms_a <= 0:
+            raise ValueError("Target current must be positive.")
+        impedance_magnitude = abs(total_impedance)
+        if impedance_magnitude <= 0:
+            raise ValueError("Total plasma impedance magnitude must be positive.")
+        return target_current_rms_a * impedance_magnitude
 
     def _parallel_impedance(self, z1: float | complex, z2: float | complex) -> complex:
         z1_complex = complex(z1)

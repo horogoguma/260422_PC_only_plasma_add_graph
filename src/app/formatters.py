@@ -22,6 +22,11 @@ def format_simulation_result(result: SimulationResult) -> str:
             f"relative sheath voltage change: {values['sheath_voltage_relative_change']})"
         ),
         (
+            "RF drive mode: "
+            f"{'current' if values['rf_drive_mode_is_current'] else 'power'} "
+            f"(current setpoint: {values['rf_current_rms_setpoint_a']} A rms)"
+        ),
+        (
             "Absorbed bulk power: "
             f"{values['absorbed_bulk_power_w']} W "
             f"(relative change: {values['bulk_power_relative_change']})"
@@ -66,10 +71,22 @@ def format_simulation_result(result: SimulationResult) -> str:
         f"Plasma conductivity: {values['plasma_conductivity']} S/m",
         f"Plasma relative permittivity: {values['plasma_relative_permittivity']}",
         f"Plasma resistance: {values['plasma_resistance']} ohm",
-        f"Plasma coil reactance: {values['plasma_coil_reactance']} ohm",
-        f"Plasma capacitive reactance: {values['plasma_capacitive_reactance']} ohm",
-        f"Plasma coil inductance: {values['plasma_coil_inductance_h']} H",
-        f"Plasma cap farad: {values['plasma_capacitance_f']} F",
+        (
+            "Bulk plasma electron-inertia inductive reactance (XL at RF): "
+            f"{values['plasma_coil_reactance']} ohm"
+        ),
+        (
+            "Bulk plasma space capacitive reactance (XC at RF): "
+            f"{values['plasma_capacitive_reactance']} ohm"
+        ),
+        (
+            "Bulk plasma electron-inertia equivalent inductance: "
+            f"{values['plasma_coil_inductance_h']} H"
+        ),
+        (
+            "Bulk plasma space equivalent capacitance: "
+            f"{values['plasma_capacitance_f']} F"
+        ),
         f"Plasma sheath capacitance: {values['plasma_sheath_capacitance_f_per_m2']} F/m^2",
         (
             "Plasma sheath capacitance (electrode): "
@@ -94,13 +111,14 @@ def format_simulation_result(result: SimulationResult) -> str:
         ),
         f"Plasma wall potential: {values['plasma_wall_potential_v']} V",
         f"Plasma target power: {values['plasma_target_power_w']} W",
+        f"Plasma target current rms: {values['plasma_target_current_rms_a']} A",
         f"Plasma source voltage peak: {values['plasma_source_voltage_peak_v']} V",
         f"Plasma source voltage rms: {values['plasma_source_voltage_rms_v']} V",
         f"Plasma voltage bias: {values['plasma_voltage_bias_v']} V",
         f"Plasma bias V_theta: {values['plasma_bias_v_theta_rad']} rad",
         f"Plasma voltage sheath grounded: {values['plasma_voltage_sheath_grounded_v']} V",
         f"Plasma voltage sheath electrode: {values['plasma_voltage_sheath_electrode_v']} V",
-        f"Plasma bulk impedance: {values['plasma_bulk_impedance_ohm']} ohm",
+        f"Bulk plasma equivalent impedance: {values['plasma_bulk_impedance_ohm']} ohm",
         (
             "Plasma grounded sheath impedance: "
             f"{values['plasma_grounded_sheath_impedance_ohm']} ohm"
@@ -109,11 +127,11 @@ def format_simulation_result(result: SimulationResult) -> str:
         f"Plasma source current rms: {values['plasma_source_current_rms_a']} A",
         f"Plasma src node current rms: {values['plasma_src_node_current_rms_a']} A",
         (
-            "Plasma src node resistor current rms: "
+            "Electrode sheath series resistor current rms: "
             f"{values['plasma_src_node_resistor_current_rms_a']} A"
         ),
         (
-            "Plasma src node capacitor current rms: "
+            "Electrode sheath series capacitor current rms: "
             f"{values['plasma_src_node_capacitor_current_rms_a']} A"
         ),
         (

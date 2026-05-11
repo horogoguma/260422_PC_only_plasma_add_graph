@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass, replace
 from math import sqrt
+from typing import Literal
 
 from .plasma import ChamberConditions, PlasmaCalculator, PlasmaComputationResult, PlasmaConditions
 from .spice import PlasmaCircuitParameters, PlasmaCircuitResult, SpiceSimulator
 
 MIN_BULK_HEIGHT_M = 0.5e-3
+RFDriveMode = Literal["power", "current"]
+
+
+class CoupledSolverConvergenceError(ValueError):
+    """Raised when the coupled plasma-circuit iteration fails to converge."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,8 @@ def solve_self_consistent_plasma_circuit(
     simulator: SpiceSimulator,
     chamber: ChamberConditions,
     plasma_conditions: PlasmaConditions,
+    rf_drive_mode: RFDriveMode = "power",
+    target_current_rms_a: float | None = None,
     max_iterations: int = 1000,
     min_iterations: int = 30,
     min_sheath_hold_iterations: int = 20,
@@ -69,6 +77,11 @@ def solve_self_consistent_plasma_circuit(
     sheath_damping: float = 0.05,
 ) -> SelfConsistentPlasmaCircuitResult:
     """Iterate until plasma sheath lengths and sheath voltage are self-consistent."""
+    if rf_drive_mode not in ("power", "current"):
+        raise ValueError("rf_drive_mode must be either 'power' or 'current'.")
+    if rf_drive_mode == "current":
+        if target_current_rms_a is None or target_current_rms_a <= 0:
+            raise ValueError("target_current_rms_a must be positive in current mode.")
     if plasma.compute_electrode_area_m2(chamber) <= 0:
         raise ValueError("Electrode area must be positive to compute current density.")
     if max_iterations <= 0:
@@ -134,11 +147,23 @@ def solve_self_consistent_plasma_circuit(
             plasma_sheath_resistance_grounded=plasma_result.plasma_sheath_resistance_grounded,
             rf_frequency_hz=working_conditions.RF_frequency,
         )
-        simulator.build_plasma_equivalent_circuit(
-            plasma_circuit,
-            target_power_w=working_conditions.RF_power,
-        )
+        if rf_drive_mode == "power":
+            simulator.build_plasma_equivalent_circuit(
+                plasma_circuit,
+                target_power_w=working_conditions.RF_power,
+            )
+        else:
+            simulator.build_plasma_equivalent_circuit_for_current(
+                plasma_circuit,
+                target_current_rms_a=target_current_rms_a,
+            )
         circuit_result = simulator.compute_plasma_circuit_response()
+        updated_rf_power = (
+            working_conditions.RF_power
+            if rf_drive_mode == "power"
+            else (1 - damping) * working_conditions.RF_power
+            + damping * circuit_result.total_resistor_power_w
+        )
         updated_absorbed_bulk_power_w = (
             (1 - damping) * working_conditions.absorbed_bulk_power_w
             + damping * circuit_result.plasma_resistance_power_w
@@ -258,6 +283,7 @@ def solve_self_consistent_plasma_circuit(
             Current_density=current_density_a_per_m2,
             electron_temperature_ev=plasma_result.electron_temperature_ev,
             rf_voltage=circuit_result.source_voltage_peak,
+            RF_power=updated_rf_power,
             absorbed_bulk_power_w=updated_absorbed_bulk_power_w,
         )
 
@@ -271,6 +297,16 @@ def solve_self_consistent_plasma_circuit(
         ):
             converged = True
             break
+
+    if not converged:
+        raise CoupledSolverConvergenceError(
+            "Coupled solver did not converge after "
+            f"{max_iterations} iterations. "
+            f"relative sheath change={last_relative_change:g}, "
+            "relative sheath voltage change="
+            f"{last_sheath_voltage_relative_change:g}, "
+            f"relative bulk power change={last_bulk_power_relative_change:g}."
+        )
 
     final_plasma_result = plasma.compute_plasma_properties(
         chamber=chamber,
@@ -286,10 +322,16 @@ def solve_self_consistent_plasma_circuit(
         plasma_sheath_resistance_grounded=final_plasma_result.plasma_sheath_resistance_grounded,
         rf_frequency_hz=working_conditions.RF_frequency,
     )
-    simulator.build_plasma_equivalent_circuit(
-        final_plasma_circuit,
-        target_power_w=working_conditions.RF_power,
-    )
+    if rf_drive_mode == "power":
+        simulator.build_plasma_equivalent_circuit(
+            final_plasma_circuit,
+            target_power_w=working_conditions.RF_power,
+        )
+    else:
+        simulator.build_plasma_equivalent_circuit_for_current(
+            final_plasma_circuit,
+            target_current_rms_a=target_current_rms_a,
+        )
     final_circuit_result = simulator.compute_plasma_circuit_response()
     final_current_density_electrode_rms, final_current_density_grounded_rms = (
         plasma.compute_sheath_current_densities(
@@ -320,6 +362,11 @@ def solve_self_consistent_plasma_circuit(
         Current_density=final_current_density_electrode,
         sheath_voltage=final_updated_sheath_voltage,
         rf_voltage=final_circuit_result.source_voltage_peak,
+        RF_power=(
+            working_conditions.RF_power
+            if rf_drive_mode == "power"
+            else final_circuit_result.total_resistor_power_w
+        ),
         absorbed_bulk_power_w=final_circuit_result.plasma_resistance_power_w,
     )
     final_plasma_result = plasma.compute_plasma_properties(
@@ -336,10 +383,16 @@ def solve_self_consistent_plasma_circuit(
         plasma_sheath_resistance_grounded=final_plasma_result.plasma_sheath_resistance_grounded,
         rf_frequency_hz=working_conditions.RF_frequency,
     )
-    simulator.build_plasma_equivalent_circuit(
-        final_plasma_circuit,
-        target_power_w=working_conditions.RF_power,
-    )
+    if rf_drive_mode == "power":
+        simulator.build_plasma_equivalent_circuit(
+            final_plasma_circuit,
+            target_power_w=working_conditions.RF_power,
+        )
+    else:
+        simulator.build_plasma_equivalent_circuit_for_current(
+            final_plasma_circuit,
+            target_current_rms_a=target_current_rms_a,
+        )
     final_circuit_result = simulator.compute_plasma_circuit_response()
     final_current_density_electrode_rms, final_current_density_grounded_rms = (
         plasma.compute_sheath_current_densities(

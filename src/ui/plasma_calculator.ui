@@ -131,23 +131,43 @@
             <widget class="QLineEdit" name="initialSheathLengthGroundedMmEdit"/>
            </item>
            <item row="9" column="0">
+            <widget class="QLabel" name="rfDriveModeLabel">
+             <property name="text">
+              <string>RF control mode</string>
+             </property>
+            </widget>
+           </item>
+           <item row="9" column="1">
+            <widget class="QComboBox" name="rfDriveModeComboBox"/>
+           </item>
+           <item row="10" column="0">
             <widget class="QLabel" name="rfPowerLabel">
              <property name="text">
               <string>RF power (W)</string>
              </property>
             </widget>
            </item>
-           <item row="9" column="1">
+           <item row="10" column="1">
             <widget class="QLineEdit" name="rfPowerEdit"/>
            </item>
-           <item row="10" column="0">
+           <item row="11" column="0">
+            <widget class="QLabel" name="rfCurrentRmsLabel">
+             <property name="text">
+              <string>RF current rms (A)</string>
+             </property>
+            </widget>
+           </item>
+           <item row="11" column="1">
+            <widget class="QLineEdit" name="rfCurrentRmsEdit"/>
+           </item>
+           <item row="12" column="0">
             <widget class="QLabel" name="rfFrequencyLabel">
              <property name="text">
               <string>RF frequency (Hz)</string>
              </property>
             </widget>
            </item>
-           <item row="10" column="1">
+           <item row="12" column="1">
             <widget class="QLineEdit" name="rfFrequencyEdit"/>
            </item>
           </layout>
